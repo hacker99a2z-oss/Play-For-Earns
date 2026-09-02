@@ -7,6 +7,11 @@ const { Telegraf } = require('telegraf');
 const crypto = require('crypto');
 require('dotenv').config();
 
+const admin = require('firebase-admin');
+admin.initializeApp({
+  credential: admin.credential.applicationDefault()
+});
+
 const authRoutes = require('./routes/auth');
 const User = require('./models/User'); 
 
@@ -32,7 +37,7 @@ const matchSchema = new mongoose.Schema({
   entryFeeCoins: { type: Number, default: 250 },
   status: { type: String, enum: ['pending', 'completed'], default: 'pending' },
   players: [{
-    telegramId: String,
+    userId: String,
     firstName: String,
     hits: { type: Number, default: 0 },
     timeTaken: { type: Number, default: 0 },
@@ -61,20 +66,8 @@ const getUsername = (urlOrUsername) => {
   return lastPart ? `@${lastPart}` : null;
 };
 
-bot.start((ctx) => {
-  ctx.reply('Welcome! Click below to open the app or join our community:', {
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: '🎮 Open App', web_app: { url: WEB_APP_URL } }],
-        [{ text: '📢 Official Channel', url: CHANNEL_URL }],
-        [{ text: '💬 Official Group', url: GROUP_URL }]
-      ]
-    }
-  });
-});
-
 if (process.env.BOT_TOKEN) {
-  const WEBHOOK_URL = process.env.WEBHOOK_URL || 'https://play-for-win.onrender.com/telegram-webhook';
+  const WEBHOOK_URL = process.env.WEBHOOK_URL || 'https://play-for-earns.onrender.com/telegram-webhook';
   bot.telegram.setWebhook(WEBHOOK_URL)
     .then(() => console.log('✅ Webhook Configured Successfully'))
     .catch((err) => console.error('Webhook Error:', err.message));
@@ -111,45 +104,13 @@ const getClientIpAndCountry = async (req, frontendIp) => {
   return { clientIp, countryName: 'Unknown', isVpnOrProxy: false };
 };
 
-// 🟢 Telegram WebApp initData Verification Function
-function verifyTelegramWebAppData(telegramInitData) {
-  if (!telegramInitData) return false;
-
-  try {
-    const urlParams = new URLSearchParams(telegramInitData);
-    const hash = urlParams.get('hash');
-    urlParams.delete('hash');
-
-    const paramsChain = [];
-    for (const [key, value] of urlParams.entries()) {
-      paramsChain.push(`${key}=${value}`);
-    }
-    paramsChain.sort();
-    const dataCheckString = paramsChain.join('\n');
-
-    const secretKey = crypto
-      .createHmac('sha256', 'WebAppData')
-      .update(process.env.BOT_TOKEN || BOT_TOKEN)
-      .digest();
-
-    const calculatedHash = crypto
-      .createHmac('sha256', secretKey)
-      .update(dataCheckString)
-      .digest('hex');
-
-    return calculatedHash === hash;
-  } catch (err) {
-    console.error("InitData verification error:", err);
-    return false;
-  }
-}
 
 // 🟢 ঠিক এই জায়গায় processMatchCompletion ফাংশনটি বসান
-const processMatchCompletion = async (matchId, telegramId, score, timeTaken) => {
+const processMatchCompletion = async (matchId, userId, score, timeTaken) => {
   let match = await Match.findById(matchId);
   if (!match) throw new Error('Match not found');
 
-  const playerIndex = match.players.findIndex(p => String(p.telegramId) === String(telegramId));
+  const playerIndex = match.players.findIndex(p => String(p.userId) === String(userId));
   
   if (playerIndex !== -1) {
     match.players[playerIndex].hits = Number(score) || 0;
@@ -157,7 +118,7 @@ const processMatchCompletion = async (matchId, telegramId, score, timeTaken) => 
     match.players[playerIndex].finishedAt = new Date();
   } else {
     match.players.push({
-      telegramId: String(telegramId),
+      userId: String(userId),
       hits: Number(score) || 0,
       timeTaken: Number(timeTaken) || 0,
       finishedAt: new Date()
@@ -191,7 +152,7 @@ const processMatchCompletion = async (matchId, telegramId, score, timeTaken) => 
     for (const p of match.players) {
       if (p.prizeUSD > 0) {
         await User.findOneAndUpdate(
-          { telegramId: p.telegramId },
+          { userId: p.userId },
           { $inc: { bonusBalanceUSD: p.prizeUSD } }
         );
       }
@@ -205,16 +166,16 @@ const processMatchCompletion = async (matchId, telegramId, score, timeTaken) => 
 // Deduct Coins API (Updated for double spend prevention)
 app.post('/api/user/deduct-coins', async (req, res) => {
   try {
-    const { telegramId, amount } = req.body;
+    const { userId, amount } = req.body;
     const deductAmount = Number(amount);
 
-    if (!telegramId || isNaN(deductAmount) || deductAmount <= 0) {
+    if (!userId || isNaN(deductAmount) || deductAmount <= 0) {
       return res.status(400).json({ success: false, message: 'Invalid payload' });
     }
 
     // 🔴 আপডেট: findOneAndUpdate ব্যবহার করে ব্যালেন্স পর্যাপ্ত থাকলে তবেই কাটা
     const updatedUser = await User.findOneAndUpdate(
-      { telegramId, mainCoins: { $gte: deductAmount } },
+      { userId, mainCoins: { $gte: deductAmount } },
       { $inc: { mainCoins: -deductAmount } },
       { new: true }
     );
@@ -233,19 +194,19 @@ app.post('/api/user/deduct-coins', async (req, res) => {
 // Match Join API (Updated with Atomic Operations)
 app.post('/api/match/join', async (req, res) => {
   try {
-    const { telegramId, firstName, mode } = req.body;
+    const { userId, firstName, mode } = req.body;
 
-    if (!telegramId) {
-      return res.status(400).json({ success: false, error: "Telegram ID is required" });
+    if (!userId) {
+      return res.status(400).json({ success: false, error: "Google User is required" });
     }
 
     const matchMode = Number(mode) || 2;
-    const playerTelegramId = String(telegramId);
+    const playeruserId = String(userId);
     const entryFee = 250;
 
     const userPendingCount = await Match.countDocuments({
       status: 'pending',
-      'players.telegramId': playerTelegramId
+      'players.userId': playeruserId
     });
 
     if (userPendingCount >= 3) {
@@ -257,7 +218,7 @@ app.post('/api/match/join', async (req, res) => {
 
     // 🔴 আপডেট: পারমাণবিক উপায়ে (Atomic) ব্যালেন্স চেক ও কাটা
     const user = await User.findOneAndUpdate(
-      { telegramId: playerTelegramId, mainCoins: { $gte: entryFee } },
+      { userId: playeruserId, mainCoins: { $gte: entryFee } },
       { $inc: { mainCoins: -entryFee } },
       { new: true }
     );
@@ -272,10 +233,10 @@ app.post('/api/match/join', async (req, res) => {
         status: 'pending',
         mode: matchMode,
         $expr: { $lt: [{ $size: "$players" }, matchMode] },
-        'players.telegramId': { $ne: playerTelegramId }
+        'players.userId': { $ne: playeruserId }
       },
       {
-        $push: { players: { telegramId: playerTelegramId, firstName: firstName || 'Player', hits: 0, timeTaken: 0 } }
+        $push: { players: { userId: playeruserId, firstName: firstName || 'Player', hits: 0, timeTaken: 0 } }
       },
       { new: true }
     );
@@ -285,7 +246,7 @@ app.post('/api/match/join', async (req, res) => {
         mode: matchMode,
         entryFeeCoins: entryFee,
         status: 'pending',
-        players: [{ telegramId: playerTelegramId, firstName: firstName || 'Player', hits: 0, timeTaken: 0 }]
+        players: [{ userId: playeruserId, firstName: firstName || 'Player', hits: 0, timeTaken: 0 }]
       });
       await match.save();
     }
@@ -308,15 +269,15 @@ app.post('/api/match/join', async (req, res) => {
 // Score Submit / Finish API (Updated)
 app.post(['/api/match/submit-score', '/api/match/finish'], async (req, res) => {
   try {
-    const { matchId, telegramId, hits, score, timeTaken } = req.body;
+    const { matchId, userId, hits, score, timeTaken } = req.body;
     const finalScore = hits !== undefined ? hits : score;
 
-    if (!matchId || !telegramId) {
-      return res.status(400).json({ success: false, message: 'matchId and telegramId required' });
+    if (!matchId || !userId) {
+      return res.status(400).json({ success: false, message: 'matchId and google User required' });
     }
 
     // হেলপার ফাংশনটিকে কল করা হচ্ছে
-    const match = await processMatchCompletion(matchId, telegramId, finalScore, timeTaken);
+    const match = await processMatchCompletion(matchId, userId, finalScore, timeTaken);
     res.json({ success: true, match });
   } catch (err) {
     console.error('Submit Score Error:', err);
@@ -325,10 +286,10 @@ app.post(['/api/match/submit-score', '/api/match/finish'], async (req, res) => {
 });
 
 // ৪. লাস্ট ৫টি ম্যাচের হিস্ট্রি
-app.get('/api/match/history/:telegramId', async (req, res) => {
+app.get('/api/match/history/:userId', async (req, res) => {
   try {
-    const { telegramId } = req.params;
-    const history = await Match.find({ 'players.telegramId': String(telegramId) })
+    const { userId } = req.params;
+    const history = await Match.find({ 'players.userId': String(userId) })
       .sort({ createdAt: -1 }) // নতুন ম্যাচ সবার ওপরে দেখাবে
       .limit(5)          // সবসময় লেটেস্ট ৫টি ম্যাচ ফিল্টার করবে
       .lean();
@@ -345,7 +306,7 @@ app.get('/api/match/history/:telegramId', async (req, res) => {
 
       // ২. ইউজারের বর্তমান র‍্যাঙ্ক ইনডেক্স খুঁজে বের করা
       const userRankIndex = matchObj.players.findIndex(
-        p => String(p.telegramId) === String(telegramId)
+        p => String(p.userId) === String(userId)
       );
 
       // ৩. মোড ও র‍্যাঙ্ক অনুযায়ী প্রাইস সেট করা
@@ -361,7 +322,7 @@ app.get('/api/match/history/:telegramId', async (req, res) => {
 
       // ৪. পেন্ডিং থাকা অবস্থায় সম্ভাব্য প্রাইজ যুক্ত করা
       matchObj.players = matchObj.players.map(p => {
-        if (m.status === 'pending' && String(p.telegramId) === String(telegramId)) {
+        if (m.status === 'pending' && String(p.userId) === String(userId)) {
           return {
             ...p,
             prizeUSD: p.prizeUSD > 0 ? p.prizeUSD : potentialPrize
@@ -390,7 +351,7 @@ app.post('/api/save-user-location', async (req, res) => {
     const { countryName, isVpnOrProxy } = await getClientIpAndCountry(req, frontendIp);
 
     await User.findOneAndUpdate(
-      { telegramId: String(userId) },
+      { userId: String(userId) },
       { 
         country: countryName, 
         isVpn: isVpnOrProxy, 
@@ -407,20 +368,26 @@ app.post('/api/save-user-location', async (req, res) => {
 });
 
 app.post('/api/user/sync', async (req, res) => {
-  const { telegramId, firstName, username, photoUrl, referrerId, clientIp: frontendIp } = req.body;
+  // 🟢 userId এবং idToken দুটোই রিসিভ করা হলো, যাতে আগের কোড ভাঙ না যায়
+  const { idToken, userId, firstName, username, photoUrl, referrerId, clientIp: frontendIp } = req.body;
 
-  if (!telegramId) {
-    return res.status(400).json({ error: 'Telegram ID required' });
+  if (!userId || !idToken) {
+    return res.status(400).json({ error: 'User ID and Firebase ID Token are required' });
   }
 
   try {
+    // ফায়ারবেস টোকেন ভেরিফাই করে নিশ্চিত হওয়া যে ইউজার বৈধ
+    const decodedToken = await admin.auth().verifyIdToken(idToken);
+    if (decodedToken.uid !== String(userId)) {
+      return res.status(403).json({ error: 'Unauthorized user mismatch!' });
+    }
     const { countryName, isVpnOrProxy } = await getClientIpAndCountry(req, frontendIp);
 
-    let user = await User.findOne({ telegramId: String(telegramId) }).populate('referrals', 'firstName username photoUrl gamesPlayedForReferral');
+    let user = await User.findOne({ userId: String(userId) }).populate('referrals', 'firstName username photoUrl gamesPlayedForReferral');
 
     if (!user) {
       user = new User({
-        telegramId: String(telegramId),
+        userId: String(userId),
         firstName: firstName || 'User',
         username: username || '',
         photoUrl: photoUrl || '',
@@ -430,9 +397,9 @@ app.post('/api/user/sync', async (req, res) => {
       });
       await user.save();
 
-      if (referrerId && String(referrerId) !== String(telegramId)) {
+      if (referrerId && String(referrerId) !== String(userId)) {
         await User.findOneAndUpdate(
-          { telegramId: String(referrerId) },
+          { userId: String(referrerId) },
           {
             $inc: { referralCount: 1 },
             $push: { referrals: user._id }
@@ -469,62 +436,116 @@ app.post('/api/user/sync', async (req, res) => {
   }
 });
 
-app.post('/api/user/verify-monetag-impression', async (req, res) => {
-  // CORS হেডার সরাসরি সেট করুন
-  res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
+// রেফারেল কোড লিঙ্ক এবং বন্ধুর অ্যাকাউন্টে তথ্য সেভ করার API
+app.post('/api/user/apply-referral', async (req, res) => {
+  try {
+    const { userId, referralCode } = req.body;
+
+    if (!userId || !referralCode) {
+      return res.status(400).json({ success: false, message: 'User ID and Referral Code are required' });
+    }
+
+    // নিজের কোড নিজে ব্যবহার করা আটকানোর জন্য
+    if (String(userId) === String(referralCode)) {
+      return res.status(400).json({ success: false, message: "You can't use your own referral code!" });
+    }
+
+    // বর্তমান ইউজারকে খুঁজে বের করা
+    let currentUser = await User.findOne({ userId: String(userId) });
+    if (!currentUser) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+
+    // যদি ইউজার ইতিমধ্যে কারো রেফারেল ব্যবহার করে থাকে
+    if (currentUser.referredBy) {
+      return res.status(400).json({ success: false, message: 'Referral code already applied!' });
+    }
+
+    // যে বন্ধু রেফার করেছে (Referrer) তাকে খুঁজে বের করা
+    let referrerUser = await User.findOne({ userId: String(referralCode) });
+    if (!referrerUser) {
+      return res.status(404).json({ success: false, message: 'Invalid Referral Code! Referrer not found.' });
+    }
+
+    // ১. বর্তমান ইউজারের `referredBy` আপডেট করা
+    currentUser.referredBy = String(referralCode);
+    await currentUser.save();
+
+    // ২. বন্ধুর (Referrer) অ্যাকাউন্টে ইউজারের তথ্য সেভ করা
+    const alreadyExists = referrerUser.referrals.includes(currentUser._id);
+    if (!alreadyExists) {
+      referrerUser.referralCount = (referrerUser.referralCount || 0) + 1;
+      referrerUser.referrals.push(currentUser._id); // রেফারের অ্যারেতে ইউজারের অবজেক্ট আইডি যুক্ত হলো
+      await referrerUser.save();
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Referral code linked successfully!',
+      referredBy: currentUser.referredBy
+    });
+
+    } catch (err) {
+      console.error('Apply referral error:', err);
+      return res.status(500).json({ success: false, message: 'Server error' });
+    }
+});
+
+// ==================== UNITY LEVELPLAY AD REWARD API ====================
+// অ্যান্ড্রয়েড অ্যাপে Unity LevelPlay থেকে রিওয়ার্ড পাওয়ার পর এই এন্ডপয়েন্টে কল করা হবে
+app.post('/api/user/ad-reward', async (req, res) => {
+  const { userId } = req.body;
+
+  if (!userId) {
+    return res.status(400).json({ success: false, message: 'User ID is required' });
+  }
 
   try {
-    const { telegramId } = req.body;
+    const user = await User.findOneAndUpdate(
+      { userId: String(userId) },
+      { 
+        $inc: { 
+          mainCoins: 80, 
+          dailyCoins: 80,
+          adsWatched: 1 
+        } 
+      },
+      { new: true }
+    );
 
-    if (!telegramId) {
-      return res.status(200).json({ success: false, message: 'Telegram ID missing' });
-    }
-
-    // ID দিয়ে ইউজার খোঁজা
-    let user = await User.findOne({ telegramId: String(telegramId) });
-    
     if (!user) {
-      return res.status(200).json({ success: false, message: 'User not found in DB' });
+      return res.status(404).json({ success: false, message: 'User not found' });
     }
 
-    // কয়েন যোগ
-    const REWARD_COINS = 80;
-    user.mainCoins = Number(user.mainCoins || 0) + REWARD_COINS;
-    user.dailyCoins = Number(user.dailyCoins || 0) + REWARD_COINS;
-    
-    await user.save();
-
-    return res.status(200).json({ 
-      success: true, 
+    return res.status(200).json({
+      success: true,
+      message: '80 coins added successfully',
       mainCoins: user.mainCoins,
       dailyCoins: user.dailyCoins
     });
-
-  } catch (err) {
-    console.error("Backend Error:", err);
-    // 500 না পাঠিয়ে 200 পাঠাবো যেন Network Error না মারে
-    return res.status(200).json({ success: false, message: 'Server Internal Error' });
+  } catch (error) {
+    console.error('Unity Ad reward error:', error);
+    return res.status(500).json({ success: false, message: 'Internal Server Error' });
   }
 });
 
 // ৫. রিওয়ার্ড ক্লেইম (Anti-Cheat Security)
 app.post('/api/game/reward', async (req, res) => {
   try {
-    const { telegramId, coins } = req.body;
+    const { userId, coins } = req.body;
     const rewardCoins = Number(coins);
 
-    if (!telegramId || isNaN(rewardCoins) || rewardCoins <= 0) {
+    if (!userId || isNaN(rewardCoins) || rewardCoins <= 0) {
       return res.status(400).json({ success: false, message: 'Invalid payload' });
     }
 
     const MAX_ALLOWED_COINS = 300; 
     if (rewardCoins > MAX_ALLOWED_COINS) {
-      console.warn(`🚨 Anti-Cheat Triggered for User: ${telegramId}. Attempted coins: ${rewardCoins}`);
+      console.warn(`🚨 Anti-Cheat Triggered for User: ${userId}. Attempted coins: ${rewardCoins}`);
       return res.status(403).json({ success: false, message: 'Cheating detected! Reward denied.' });
     }
 
-    let user = await User.findOne({ telegramId: String(telegramId) });
+    let user = await User.findOne({ userId: String(userId) });
     if (!user) {
       return res.status(404).json({ success: false, message: 'User not found' });
     }
@@ -535,7 +556,7 @@ app.post('/api/game/reward', async (req, res) => {
 
     if (user.referredBy && user.gamesPlayedForReferral >= 10 && !user.referralBonusGiven) {
       await User.findOneAndUpdate(
-        { telegramId: String(user.referredBy) },
+        { userId: String(user.referredBy) },
         {
           $inc: {
             mainCoins: 1000,
@@ -557,158 +578,6 @@ app.post('/api/game/reward', async (req, res) => {
     });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
-  }
-});
-
-/*
-// AdsGram Webhook Endpoint
-app.get('/api/adsgram-reward', async (req, res) => {
-  const targetUserId = req.query.userId || req.query.userid;
-
-  if (!targetUserId) {
-    return res.status(400).send('User ID missing');
-  }
-
-  try {
-    let user = await User.findOne({ telegramId: targetUserId });
-
-    if (user) {
-      user.adsWatched = (user.adsWatched || 0) + 1;
-      await user.save();
-      console.log(`✅ Adsgram Ad Verified & Counted for User: ${targetUserId}`);
-    }
-
-    return res.status(200).send('OK');
-  } catch (err) {
-    console.error('AdsGram Webhook Error:', err);
-    return res.status(500).send('Internal Server Error');
-  }
-});
-
-// Direct Server-Side Verification Endpoint
-app.post('/api/adsgram-verify', async (req, res) => {
-  try {
-    const { telegramId, initData } = req.body;
-    if (!telegramId) return res.status(400).json({ success: false, message: 'User ID required' });
-
-    // 🛑 ১. টেলিগ্রাম অফিশিয়াল অ্যাপ ভ্যালিডেশন চেক
-    const isValidTelegramUser = verifyTelegramWebAppData(initData);
-    if (!isValidTelegramUser) {
-      console.warn(`🚨 [SECURITY ALERT] Fake/Modified Telegram client used by ID: ${telegramId}`);
-      return res.status(403).json({ 
-        success: false, 
-        verified: false, 
-        message: 'Unauthorized! Please use the official Telegram app.' 
-      });
-    }
-
-    // ১. ডাটাবেজে ইউজারের লাস্ট ওয়াচ টাইম বা ইম্প্রেশন আপডেট/চেক
-    let user = await User.findOne({ telegramId });
-    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
-
-    // সার্ভার থেকে সফল কনফার্মেশন পাঠানো
-    user.adsWatched = (user.adsWatched || 0) + 1;
-    await user.save();
-
-    console.log(`✅ Server Verified Ad for User: ${telegramId}`);
-    return res.json({ success: true, verified: true });
-
-  } catch (err) {
-    console.error('Ad Verification Server Error:', err);
-    return res.status(500).json({ success: false, error: 'Verification failed' });
-  }
-});
-*/
-
-// Monetag Server Postback (Secure Verification)
-app.get('/api/monetag-postback', async (req, res) => {
-  const { sub_id, secret, trans_id } = req.query;
-
-  // ১. প্রয়োজনীয় প্যারামিটার চেক
-  if (!sub_id) {
-    return res.status(400).send('Missing sub_id');
-  }
-
-  // ২. সিকিউরিটি চেক (Monetag ড্যাশবোর্ড থেকে সেট করা Secret Token মিলাবে)
-  const MONETAG_SECRET = process.env.MONETAG_SECRET_KEY || 'YOUR_SECRET_KEY';
-  if (secret !== MONETAG_SECRET) {
-    console.warn(`🚨 Unauthorized Postback Attempt for ID: ${sub_id}`);
-    return res.status(403).send('Forbidden: Invalid Secret');
-  }
-
-  try {
-    let user = await User.findOne({
-      $or: [{ pendingSubId: String(sub_id) }, { telegramId: String(sub_id) }]
-    });
-
-    if (!user) {
-      return res.status(404).send('User not found');
-    }
-
-    // ৩. ডুপ্লিকেট পেমেন্ট/পোস্টব্যাক রোধ (Replay Attack Prevention)
-    if (trans_id) {
-      if (!user.processedTransactions) {
-        user.processedTransactions = [];
-      }
-
-      if (user.processedTransactions.includes(trans_id)) {
-        console.log(`⚠️ Duplicate postback skipped for Transaction ID: ${trans_id}`);
-        return res.status(200).send('OK (Already Processed)');
-      }
-
-      user.processedTransactions.push(trans_id);
-    }
-
-    // ৪. রিওয়ার্ড ও অ্যাড কাউন্ট আপডেট
-    user.adsWatched = (user.adsWatched || 0) + 1;
-    user.mainCoins = (user.mainCoins || 0) + 80; // প্রয়োজন অনুযায়ী কয়েন দিন
-    user.dailyCoins = (user.dailyCoins || 0) + 80;
-    user.lastVerifiedSubId = String(sub_id);
-
-    await user.save();
-
-    console.log(`✅ Monetag Postback Verified! User: ${sub_id}, Trans ID: ${trans_id || 'N/A'}`);
-    return res.status(200).send('OK');
-
-  } catch (err) {
-    console.error('Monetag Postback Error:', err);
-    return res.status(500).send('Internal Server Error');
-  }
-});
-
-// backend server.js / index.js
-
-app.post('/api/user/ad-reward', async (req, res) => {
-  const { telegramId } = req.body;
-
-  if (!telegramId) {
-    return res.status(400).json({ success: false, message: 'Telegram ID is required' });
-  }
-
-  try {
-    // ডাটাবেজে ৮০ কয়েন যোগ করার লজিক (উদাহরণস্বরূপ MongoDB/PostgreSQL)
-    const user = await User.findOneAndUpdate(
-      { telegramId: String(telegramId) },
-      { $inc: {
-          mainCoins: 80, 
-          dailyCoins: 80,
-          adsWatched: 1 
-        } 
-      },
-    );
-
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found' });
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: '80 coins added successfully',
-      mainCoins: user.coins
-    });
-  } catch (error) {
-    console.error('Ad reward error:', error);
-    return res.status(500).json({ success: false, message: 'Internal Server Error' });
   }
 });
 
@@ -734,53 +603,13 @@ app.get('/api/contest/timer', (req, res) => {
   });
 });
 
-// CHECK MEMBERSHIP API
-app.post('/api/check-membership', async (req, res) => {
-  const { telegramId } = req.body;
-  
-  if (!telegramId) {
-    return res.status(400).json({ error: 'Telegram ID required' });
-  }
-
-  const channels = [
-    getUsername(CHANNEL_URL),
-    getUsername(EXTRA_CHANNEL_URL)
-  ].filter(ch => ch !== null);
-
-  try {
-    let allJoined = true;
-    let membershipStatus = {};
-
-    for (const chatUsername of channels) {
-      try {
-        const member = await bot.telegram.getChatMember(chatUsername, telegramId);
-        const status = member.status;
-        if (['member', 'creator', 'administrator'].includes(status)) {
-          membershipStatus[chatUsername] = true;
-        } else {
-          membershipStatus[chatUsername] = false;
-          allJoined = false;
-        }
-      } catch (err) {
-        console.error(`Error checking chat ${chatUsername}:`, err.message);
-        membershipStatus[chatUsername] = false;
-        allJoined = false;
-      }
-    }
-
-    res.json({ success: true, allJoined, membershipStatus });
-  } catch (err) {
-    console.error('Membership Check Error:', err);
-    res.status(500).json({ error: 'Server error checking membership' });
-  }
-});
 
 // 3-TIER DYNAMIC WITHDRAW API
 app.post('/api/user/withdraw', async (req, res) => {
   try {
-    const { telegramId, wallet, amount } = req.body;
+    const { userId, wallet, amount } = req.body;
 
-    const user = await User.findOne({ telegramId: String(telegramId) });
+    const user = await User.findOne({ userId: String(userId) });
     if (!user) {
       return res.status(404).json({ error: 'User not found!' });
     }
@@ -840,9 +669,9 @@ app.post('/api/user/withdraw', async (req, res) => {
     try {
       const adminMessage = 
         `🚨<b>New Withdraw Request!</b>🚨\n\n` +
-        `👤<b>User:</b> ${user.firstName || 'User'} (@${user.username || 'N/A'})\n` +
+        `👤<b>User:</b> ${user.firstName || 'User'} (${user.email || user.username || 'N/A'})\n` +
         `🌍<b>Country:</b> ${user.country || 'Unknown'} (${userTier})\n` +
-        `🆔<b>Telegram ID:</b> <code>${telegramId}</code>\n` +
+        `🆔<b>userId:</b> <code>${user.userId}</code>\n` +
         `💵<b>Withdraw Amount:</b> $${reqAmount}\n` +
         `🔥<b>Coins Fee Deducted:</b> ${requiredCoins.toLocaleString()} (${coinsPerDollar.toLocaleString()}/$)\n` +
         `💎<b>TON Wallet:</b> <code>${wallet}</code>`;
@@ -870,7 +699,7 @@ mongoose.connect(process.env.MONGO_URI)
     
     // ইনডেক্স নিরাপদভাবে তৈরি করার ট্রাই-ক্যাচ ব্লক
     try {
-      await User.collection.createIndex({ telegramId: 1 }, { unique: true });
+      await User.collection.createIndex({ userId: 1 }, { unique: true });
     } catch (e) {
       // আগে থেকে ইনডেক্স থাকলে এরর স্কিপ করবে
     }
