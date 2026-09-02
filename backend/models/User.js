@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 
 const userSchema = new mongoose.Schema({
-  telegramId: { type: String, required: true, unique: true },
+  userId: { type: String, required: true, unique: true }, // 🟢 ফিক্স: useId থেকে সঠিক userId করা হলো
   firstName: { type: String, required: true },
   lastName: { type: String, default: '' },
   username: { type: String, default: '' },
@@ -19,12 +19,12 @@ const userSchema = new mongoose.Schema({
 
   // Counters
   adsWatched: { type: Number, default: 0 },
-  gamesPlayedForReferral: { type: Number, default: 0 }, // 👈 গেম খেলার কাউন্টার
+  gamesPlayedForReferral: { type: Number, default: 0 }, 
   referralBonusGiven: { type: Boolean, default: false },
   country: { type: String, default: 'Unknown' },
   isVpn: { type: Boolean, default: false },
 
-  // 🟢 Monetag Polling System (এই ২টা লাইন যোগ করবেন)
+  // Monetag Polling System
   pendingSubId: { type: String, default: '' },
   lastVerifiedSubId: { type: String, default: '' },
 
