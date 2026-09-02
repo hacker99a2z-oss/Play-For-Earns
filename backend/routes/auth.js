@@ -33,12 +33,14 @@ router.post('/login', async (req, res) => {
 
     const urlParams = new URLSearchParams(initData);
     const tgUser = JSON.parse(urlParams.get('user'));
+    const stringUserId = tgUser.id.toString();
 
-    let user = await User.findOne({ telegramId: tgUser.id.toString() });
+    // 🟢 ফিক্স: telegramId এর বদলে server.js এর সাথে মিলিয়ে userId ব্যবহার করা হলো
+    let user = await User.findOne({ userId: stringUserId });
 
     if (!user) {
       user = new User({
-        telegramId: tgUser.id.toString(),
+        userId: stringUserId,
         firstName: tgUser.first_name || 'User',
         lastName: tgUser.last_name || '',
         username: tgUser.username || '',
@@ -46,18 +48,25 @@ router.post('/login', async (req, res) => {
         referredBy: startParam || null
       });
 
-      if (startParam && startParam !== tgUser.id.toString()) {
-        await User.findOneAndUpdate(
-          { telegramId: startParam },
-          { $inc: { referralCount: 1 } }
-        );
-      }
-
       await user.save();
+
+      // 🟢 ফিক্স: server.js এর নিয়মে রেফারার ইউজারের অ্যাকাউন্ট আপডেট করা
+      if (startParam && String(startParam) !== stringUserId) {
+        let referrerUser = await User.findOne({ userId: String(startParam) });
+        if (referrerUser) {
+          const alreadyExists = referrerUser.referrals.includes(user._id);
+          if (!alreadyExists) {
+            referrerUser.referralCount = (referrerUser.referralCount || 0) + 1;
+            referrerUser.referrals.push(user._id);
+            await referrerUser.save();
+          }
+        }
+      }
     }
 
     res.json({ success: true, user });
   } catch (err) {
+    console.error("Login Route Error:", err);
     res.status(500).json({ error: 'Server Error' });
   }
 });
@@ -65,10 +74,10 @@ router.post('/login', async (req, res) => {
 // Get Top Leaderboard API
 router.get('/leaderboard', async (req, res) => {
   try {
-  const topUsers = await User.find({})
-    .sort({ dailyCoins: -1 })
-    .limit(100)
-    .select('firstName username photoUrl dailyCoins');
+    const topUsers = await User.find({})
+      .sort({ dailyCoins: -1 })
+      .limit(100)
+      .select('firstName username photoUrl dailyCoins');
 
     res.json(topUsers);
   } catch (error) {
