@@ -7,9 +7,10 @@ const { Telegraf } = require('telegraf');
 const crypto = require('crypto');
 require('dotenv').config();
 
-const admin = require('firebase-admin');
-admin.initializeApp({
-  credential: admin.credential.applicationDefault()
+const { initializeApp, applicationDefault } = require('firebase-admin/app');
+
+initializeApp({
+  credential: applicationDefault()
 });
 
 const authRoutes = require('./routes/auth');
